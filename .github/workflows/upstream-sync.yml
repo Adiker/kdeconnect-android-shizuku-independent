@@ -120,6 +120,13 @@ jobs:
           test -x "$sdk_root/build-tools/37.0.0/apksigner"
       - name: Test and build APKs
         run: ./gradlew --no-daemon --console=plain testDebugUnitTest assembleDebug assembleRelease
+      - name: Upload debug APK for device testing
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kdeconnect-debug-${{ needs.prepare.outputs.upstream }}
+          path: build/outputs/apk/debug/*-debug.apk
+          if-no-files-found: error
+          retention-days: 14
 
   pull-request:
     needs: [prepare, test]
