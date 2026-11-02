@@ -1,6 +1,7 @@
 name: Android release
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - 'v*-shizuku*'
@@ -10,6 +11,7 @@ permissions:
 
 jobs:
   release:
+    if: startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-shizuku')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
