@@ -1,0 +1,186 @@
+name: Sync KDE Connect upstream
+
+on:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: kde-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      changed: ${{ steps.merge.outputs.changed }}
+      base: ${{ steps.merge.outputs.base }}
+      upstream: ${{ steps.merge.outputs.upstream }}
+      tree: ${{ steps.merge.outputs.tree }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - id: merge
+        name: Check upstream and prepare merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          git config core.hooksPath /dev/null
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags https://github.com/KDE/kdeconnect-android.git refs/heads/master:refs/remotes/kde/master
+          base=$(git rev-parse HEAD)
+          upstream=$(git rev-parse refs/remotes/kde/master)
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor "$upstream" "$base"; then
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+            echo 'KDE master is already included in main.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if ! git -c merge.renormalize=false merge --no-commit --no-ff "$upstream"; then
+            {
+              echo '## Upstream merge conflict'
+              echo 'The merge was stopped without pushing changes. Resolve the following files manually:'
+              echo '```'
+              git diff --name-only --diff-filter=U
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo '::error::Upstream merge has conflicts; see the workflow summary. No changes were pushed.'
+            exit 1
+          fi
+          tree=$(git write-tree)
+          branch='automation/kde-upstream-sync'
+          if [ "$EVENT_NAME" = schedule ] && [ -n "$(gh pr list --base main --head "$branch" --state open --json number --jq '.[0].number // empty')" ]; then
+            if git fetch --no-tags origin "refs/heads/$branch:refs/remotes/origin/$branch"; then
+              read -r commit parent1 parent2 extra < <(git rev-list --parents -n 1 "refs/remotes/origin/$branch")
+              if [ "${parent1:-}" = "$base" ] && [ "${parent2:-}" = "$upstream" ] && [ -z "${extra:-}" ] && [ "$(git rev-parse "$commit^{tree}")" = "$tree" ]; then
+                echo 'changed=false' >> "$GITHUB_OUTPUT"
+                echo 'An up-to-date synchronization PR already exists.' >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+              fi
+            fi
+          fi
+          echo 'changed=true' >> "$GITHUB_OUTPUT"
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: prepare
+    if: needs.prepare.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.prepare.outputs.base }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reconstruct tested merge
+        env:
+          UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream }}
+          EXPECTED_TREE: ${{ needs.prepare.outputs.tree }}
+        run: |
+          set -euo pipefail
+          git config core.hooksPath /dev/null
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags https://github.com/KDE/kdeconnect-android.git refs/heads/master:refs/remotes/kde/master
+          git cat-file -e "$UPSTREAM_SHA^{commit}"
+          git -c merge.renormalize=false merge --no-commit --no-ff "$UPSTREAM_SHA"
+          test "$(git write-tree)" = "$EXPECTED_TREE"
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
+      - name: Install Android SDK
+        run: |
+          set -euo pipefail
+          sdk_root="$RUNNER_TEMP/android-sdk"
+          mkdir -p "$sdk_root/cmdline-tools"
+          curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-15859902_latest.zip -o "$RUNNER_TEMP/android-tools.zip"
+          unzip -q "$RUNNER_TEMP/android-tools.zip" -d "$sdk_root/cmdline-tools"
+          mv "$sdk_root/cmdline-tools/cmdline-tools" "$sdk_root/cmdline-tools/latest"
+          echo "ANDROID_HOME=$sdk_root" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$sdk_root" >> "$GITHUB_ENV"
+          (yes || true) | "$sdk_root/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$sdk_root" 'platforms;android-37.0' 'build-tools;36.0.0' 'build-tools;37.0.0' 'platform-tools'
+          find "$sdk_root/platforms" -name android.jar -print -quit | grep -q .
+          test -x "$sdk_root/build-tools/37.0.0/apksigner"
+      - name: Test and build APKs
+        run: ./gradlew --no-daemon --console=plain testDebugUnitTest assembleDebug assembleRelease
+
+  pull-request:
+    needs: [prepare, test]
+    if: always() && needs.prepare.result == 'success' && needs.prepare.outputs.changed == 'true' && needs.test.result != 'cancelled' && needs.test.result != 'skipped'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.prepare.outputs.base }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Publish or update synchronization PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ needs.prepare.outputs.base }}
+          UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream }}
+          EXPECTED_TREE: ${{ needs.prepare.outputs.tree }}
+          TEST_RESULT: ${{ needs.test.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          branch='automation/kde-upstream-sync'
+          git config core.hooksPath /dev/null
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$BASE_SHA" || { echo '::error::main changed during the run; retry the synchronization.'; exit 1; }
+          git fetch --no-tags https://github.com/KDE/kdeconnect-android.git refs/heads/master:refs/remotes/kde/master
+          git cat-file -e "$UPSTREAM_SHA^{commit}"
+          pr=$(gh pr list --base main --head "$branch" --state open --json number --jq '.[0].number // empty')
+          old=$(git ls-remote --heads origin "refs/heads/$branch" | cut -f1)
+          if [ -n "$old" ]; then
+            test -n "$pr" || { echo '::error::Managed branch exists without an open PR; refusing to overwrite it.'; exit 1; }
+            git fetch --no-tags origin "refs/heads/$branch:refs/remotes/origin/$branch"
+            test "$(git rev-parse "refs/remotes/origin/$branch")" = "$old"
+            read -r commit parent1 parent2 extra < <(git rev-list --parents -n 1 "$old")
+            test "$commit" = "$old"
+            test -n "${parent2:-}" && test -z "${extra:-}" || { echo '::error::Managed branch has unexpected commits; refusing to overwrite it.'; exit 1; }
+            git merge-base --is-ancestor "$parent1" "$BASE_SHA"
+            git merge-base --is-ancestor "$parent2" "$UPSTREAM_SHA"
+            old_tree=$(git merge-tree --write-tree "$parent1" "$parent2")
+            test "$(git rev-parse "$old^{tree}")" = "$old_tree" || { echo '::error::Managed branch contains manual changes; refusing to overwrite it.'; exit 1; }
+          elif [ -n "$pr" ]; then
+            echo '::error::An open synchronization PR has no branch; refusing to recreate it.'
+            exit 1
+          fi
+          if [ -z "$old" ] || [ "${parent1:-}" != "$BASE_SHA" ] || [ "${parent2:-}" != "$UPSTREAM_SHA" ] || [ "$(git rev-parse "$old^{tree}")" != "$EXPECTED_TREE" ]; then
+            git -c merge.renormalize=false merge --no-commit --no-ff "$UPSTREAM_SHA"
+            test "$(git write-tree)" = "$EXPECTED_TREE"
+            git commit -m "Merge KDE Connect upstream $UPSTREAM_SHA"
+            gh auth setup-git
+            git push --force-with-lease="refs/heads/$branch:$old" origin "HEAD:refs/heads/$branch"
+          fi
+          # Backticks are literal Markdown code delimiters.
+          # shellcheck disable=SC2016
+          body=$(printf 'Automated merge of KDE Connect master `%s` into main `%s`.\n\nTests and APK builds: **%s**. [Workflow run](%s)\n\nReview the upstream changes and Shizuku behavior before merging.' "$UPSTREAM_SHA" "$BASE_SHA" "$TEST_RESULT" "$RUN_URL")
+          if [ -n "$pr" ]; then
+            gh pr edit "$pr" --title 'Sync KDE Connect upstream master' --body "$body"
+          else
+            gh pr create --base main --head "$branch" --title 'Sync KDE Connect upstream master' --body "$body"
+          fi
