@@ -30,7 +30,9 @@ jobs:
           mv "$sdk_root/cmdline-tools/cmdline-tools" "$sdk_root/cmdline-tools/latest"
           echo "ANDROID_HOME=$sdk_root" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$sdk_root" >> "$GITHUB_ENV"
-          "$sdk_root/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$sdk_root" 'platforms;android-37.0' 'build-tools;37.0.0' 'platform-tools'
+          (yes || true) | "$sdk_root/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$sdk_root" 'platforms;android-37.0' 'build-tools;36.0.0' 'build-tools;37.0.0' 'platform-tools'
+          find "$sdk_root/platforms" -name android.jar -print -quit | grep -q .
+          test -x "$sdk_root/build-tools/37.0.0/apksigner"
       - name: Test and build release APK
         run: ./gradlew --no-daemon --console=plain testDebugUnitTest assembleRelease
       - name: Sign and verify APK
