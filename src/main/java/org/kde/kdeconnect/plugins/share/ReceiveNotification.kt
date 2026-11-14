@@ -3,7 +3,6 @@
  *
  * SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
  */
-
 package org.kde.kdeconnect.plugins.share
 
 import android.app.Notification
@@ -27,8 +26,7 @@ import java.io.IOException
 import kotlin.random.Random
 
 internal class ReceiveNotification(private val device: Device, private val jobId: Long) {
-    private val notificationManager: NotificationManager =
-        device.context.getSystemService<NotificationManager>()!!
+    private val notificationManager: NotificationManager = device.context.getSystemService<NotificationManager>()!!
     private val notificationId: Int = SystemClock.elapsedRealtime().toInt()
     private var builder: NotificationCompat.Builder =
         NotificationCompat.Builder(device.context, NotificationHelper.Channels.FILETRANSFER_DOWNLOAD)
@@ -64,11 +62,7 @@ internal class ReceiveNotification(private val device: Device, private val jobId
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        builder.addAction(
-            R.drawable.ic_reject_pairing_24dp,
-            device.context.getString(R.string.cancel),
-            cancelPendingIntent
-        )
+        builder.addAction(R.drawable.ic_reject_pairing_24dp, device.context.getString(R.string.cancel), cancelPendingIntent)
     }
 
     fun setTitle(title: String) {
@@ -90,9 +84,13 @@ internal class ReceiveNotification(private val device: Device, private val jobId
             .setAutoCancel(true)
             .setOngoing(false)
 
-        val prefs = PreferenceManager.getDefaultSharedPreferences(device.context)
-        if (prefs.getBoolean("share_notification_preference", true)) {
-            builder.setDefaults(Notification.DEFAULT_ALL)
+        // Since Android O, sound and vibration are controlled by the notification channel
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            // Remove the setting when we only support SDK 26+
+            val prefs = PreferenceManager.getDefaultSharedPreferences(device.context)
+            if (prefs.getBoolean("share_notification_preference", true)) {
+                builder.setDefaults(Notification.DEFAULT_ALL)
+            }
         }
     }
 

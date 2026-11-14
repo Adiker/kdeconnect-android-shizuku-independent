@@ -23,7 +23,6 @@ import org.kde.kdeconnect.plugins.notifications.NotificationReceiver
 import org.kde.kdeconnect.ui.StartActivityAlertDialogFragment
 import org.kde.kdeconnect_tp.R
 import java.util.concurrent.ConcurrentHashMap
-import kotlin.collections.MutableList
 
 @LoadablePlugin
 class MprisReceiverPlugin : Plugin() {
@@ -108,6 +107,8 @@ class MprisReceiverPlugin : Plugin() {
                 "PlayPause" -> player.playPause()
                 "Next" -> player.next()
                 "Previous" -> player.previous()
+                "FastForward" -> player.fastForward()
+                "Rewind" -> player.rewind()
                 "Stop" -> player.stop()
             }
         }
@@ -191,6 +192,8 @@ class MprisReceiverPlugin : Plugin() {
         np["canPause"] = player.canPause()
         np["canGoPrevious"] = player.canGoPrevious()
         np["canGoNext"] = player.canGoNext()
+        np["canFastForward"] = player.canFastForward()
+        np["canRewind"] = player.canRewind()
         np["canSeek"] = player.canSeek()
         np["volume"] = player.volume
         np["albumArtUrl"] = player.art?.url ?: ""
