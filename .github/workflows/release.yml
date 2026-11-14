@@ -1,26 +1,76 @@
 name: Android release
 
 on:
-  workflow_dispatch:
   push:
-    tags:
-      - 'v*-shizuku*'
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      commit:
+        required: true
+        type: string
+      upstream_tag:
+        required: true
+        type: string
 
-permissions:
-  contents: write
+permissions: {}
+
+concurrency:
+  group: android-release
+  cancel-in-progress: false
 
 jobs:
   release:
-    if: startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-shizuku')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.commit || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - id: select
+        name: Verify release candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TAG_INPUT: ${{ inputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          commit=$(git rev-parse HEAD)
+          test "$(git rev-parse refs/remotes/origin/main)" = "$commit" || { echo '::error::main changed; retry against the current main.'; exit 1; }
+          git fetch --no-tags https://github.com/KDE/kdeconnect-android.git '+refs/tags/*:refs/kde-tags/*'
+          git for-each-ref --format='%(refname:strip=2)' refs/kde-tags > "$RUNNER_TEMP/kde-tags"
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName,isDraft,isPrerelease > "$RUNNER_TEMP/fork-releases.json"
+          tag=$(python3 .github/scripts/select-upstream-tag.py "$RUNNER_TEMP/kde-tags" "$RUNNER_TEMP/fork-releases.json")
+          if [ -z "$tag" ]; then
+            echo 'publish=false' >> "$GITHUB_OUTPUT"
+            echo 'No new stable upstream release.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ -n "$UPSTREAM_TAG_INPUT" ]; then
+            test "$tag" = "$UPSTREAM_TAG_INPUT" || { echo '::error::The latest upstream tag changed; retry synchronization.'; exit 1; }
+          fi
+          upstream=$(git rev-parse "refs/kde-tags/$tag^{commit}")
+          git merge-base --is-ancestor "$upstream" "$commit" || { echo '::notice::The upstream release is not included in main yet.'; echo 'publish=false' >> "$GITHUB_OUTPUT"; exit 0; }
+          version=${tag#v}
+          declared=$(sed -nE 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' build.gradle.kts)
+          test "$declared" = "$version" || { echo '::error::App version does not match the upstream tag.'; exit 1; }
+          echo 'publish=true' >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "tag_object=$(git rev-parse "refs/kde-tags/$tag")" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        if: steps.select.outputs.publish == 'true'
         with:
           distribution: temurin
           java-version: '21'
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
+        if: steps.select.outputs.publish == 'true'
       - name: Install Android SDK
+        if: steps.select.outputs.publish == 'true'
         run: |
           set -euo pipefail
           sdk_root="$RUNNER_TEMP/android-sdk"
@@ -31,26 +81,83 @@ jobs:
           echo "ANDROID_HOME=$sdk_root" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$sdk_root" >> "$GITHUB_ENV"
           (yes || true) | "$sdk_root/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$sdk_root" 'platforms;android-37.0' 'build-tools;36.0.0' 'build-tools;37.0.0' 'platform-tools'
-          find "$sdk_root/platforms" -name android.jar -print -quit | grep -q .
           test -x "$sdk_root/build-tools/37.0.0/apksigner"
       - name: Test and build release APK
-        run: ./gradlew --no-daemon --console=plain testDebugUnitTest assembleRelease
+        if: steps.select.outputs.publish == 'true'
+        run: |
+          python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
+          ./gradlew --no-daemon --console=plain testDebugUnitTest assembleRelease
       - name: Sign and verify APK
+        if: steps.select.outputs.publish == 'true'
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          VERSION: ${{ steps.select.outputs.version }}
         run: |
           set -euo pipefail
-          test -n "$KEYSTORE_BASE64"
+          test -n "$KEYSTORE_BASE64" && test -n "$KEYSTORE_PASSWORD" && test -n "$KEY_ALIAS" && test -n "$KEY_PASSWORD"
           echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
+          trap 'rm -f "$RUNNER_TEMP/release.jks"' EXIT
           "$ANDROID_HOME/build-tools/37.0.0/zipalign" -p -f 4 build/outputs/apk/release/*-unsigned.apk "$RUNNER_TEMP/aligned.apk"
           "$ANDROID_HOME/build-tools/37.0.0/apksigner" sign --ks "$RUNNER_TEMP/release.jks" --ks-key-alias "$KEY_ALIAS" --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD --out kdeconnect-shizuku.apk "$RUNNER_TEMP/aligned.apk"
           "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --verbose --print-certs kdeconnect-shizuku.apk
+          "$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging kdeconnect-shizuku.apk | sed -n '1p' | grep -F "versionName='$VERSION'"
           sha256sum kdeconnect-shizuku.apk > SHA256SUMS
-      - name: Publish GitHub release
+      - name: Create tag and publish release
+        if: steps.select.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TAG: ${{ steps.select.outputs.tag }}
+          UPSTREAM_TAG_OBJECT: ${{ steps.select.outputs.tag_object }}
+          COMMIT: ${{ steps.select.outputs.commit }}
+          VERSION: ${{ steps.select.outputs.version }}
         run: |
-          gh release create "$GITHUB_REF_NAME" kdeconnect-shizuku.apk SHA256SUMS --verify-tag --latest --title "KDE Connect $GITHUB_REF_NAME" --notes "KDE Connect with Shizuku clipboard support. This APK is signed with this repository's own release key. An app signed with a different key must be uninstalled before installing it."
+          set -euo pipefail
+          tag="$UPSTREAM_TAG-shizuku-clipboard"
+          # Re-evaluate versions after the build so an independently published
+          # release or newer upstream tag cannot be silently superseded.
+          git fetch --no-tags https://github.com/KDE/kdeconnect-android.git '+refs/tags/*:refs/kde-tags/*'
+          git for-each-ref --format='%(refname:strip=2)' refs/kde-tags > "$RUNNER_TEMP/kde-tags-final"
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName,isDraft,isPrerelease > "$RUNNER_TEMP/fork-releases-final.json"
+          selected=$(python3 .github/scripts/select-upstream-tag.py "$RUNNER_TEMP/kde-tags-final" "$RUNNER_TEMP/fork-releases-final.json")
+          test "$selected" = "$UPSTREAM_TAG" || { echo '::error::Release selection changed during the build; retry.'; exit 1; }
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$COMMIT" || { echo '::error::main changed during the release build.'; exit 1; }
+          current=$(git ls-remote --refs https://github.com/KDE/kdeconnect-android.git "refs/tags/$UPSTREAM_TAG" | cut -f1)
+          test "$current" = "$UPSTREAM_TAG_OBJECT" || { echo '::error::Upstream tag changed during the release build.'; exit 1; }
+          gh auth setup-git
+          existing=$(git ls-remote --refs origin "refs/tags/$tag" | cut -f1)
+          if [ -n "$existing" ]; then
+            git fetch --no-tags origin "refs/tags/$tag:refs/release-tags/$tag"
+            test "$(git rev-parse "refs/release-tags/$tag^{commit}")" = "$COMMIT" || { echo '::error::Existing release tag points to another commit.'; exit 1; }
+          else
+            git push origin "$COMMIT:refs/tags/$tag"
+          fi
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft > "$RUNNER_TEMP/release-state.json"; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "KDE Connect $tag" --notes 'KDE Connect with Shizuku clipboard support. This APK uses this repository release key; an app signed with another key must be uninstalled first.'
+          else
+            test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["isDraft"])' "$RUNNER_TEMP/release-state.json")" = True || { echo '::error::Refusing to modify an existing published release.'; exit 1; }
+          fi
+          # Resume an interrupted draft only when its assets match the freshly
+          # tested build; never replace existing assets.
+          assets=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          mkdir -p "$RUNNER_TEMP/existing-assets"
+          if printf '%s\n' "$assets" | grep -Fxq kdeconnect-shizuku.apk; then
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern kdeconnect-shizuku.apk --dir "$RUNNER_TEMP/existing-assets"
+            cmp kdeconnect-shizuku.apk "$RUNNER_TEMP/existing-assets/kdeconnect-shizuku.apk" || { echo '::error::Existing draft APK differs from the tested build; refusing to publish it.'; exit 1; }
+          else
+            gh release upload "$tag" kdeconnect-shizuku.apk --repo "$GITHUB_REPOSITORY"
+          fi
+          if printf '%s\n' "$assets" | grep -Fxq SHA256SUMS; then
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --dir "$RUNNER_TEMP/existing-assets"
+            cmp SHA256SUMS "$RUNNER_TEMP/existing-assets/SHA256SUMS" || { echo '::error::Existing checksum does not match the APK.'; exit 1; }
+          else
+            gh release upload "$tag" SHA256SUMS --repo "$GITHUB_REPOSITORY"
+          fi
+          main_now=$(git ls-remote --heads origin refs/heads/main | cut -f1)
+          test "$main_now" = "$COMMIT" || { echo '::error::main changed before publication; draft retained.'; exit 1; }
+          upstream_now=$(git ls-remote --refs https://github.com/KDE/kdeconnect-android.git "refs/tags/$UPSTREAM_TAG" | cut -f1)
+          test "$upstream_now" = "$UPSTREAM_TAG_OBJECT" || { echo '::error::Upstream tag changed before publication; draft retained.'; exit 1; }
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest

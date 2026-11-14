@@ -2,6 +2,7 @@ package org.kde.kdeconnect.plugins.clipboard
 
 import android.app.Application
 import android.content.Context
+import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.mockk.every
@@ -14,6 +15,7 @@ import org.junit.Assert
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Shadows.shadowOf
 import org.kde.kdeconnect.Device
 import org.kde.kdeconnect.MockSharedPreference
 import org.kde.kdeconnect.NetworkPacket
@@ -127,6 +129,7 @@ class ClipboardPluginTest {
         val content = "B7n30xe0NNO6Y1J7PXOFj6pGd"
         every { clipboardListener.currentContent } returns content
         every { clipboardListener.currentContentType } returns ClipboardListener.ClipboardContentType.Text
+        every { clipboardListener.updateTimestamp } returns 0L
 
         clipboardPlugin.onCreate()
 
@@ -176,5 +179,44 @@ class ClipboardPluginTest {
         val sentPacket = checkNotNull(packet)
         Assert.assertEquals("kdeconnect.clipboard", sentPacket.type)
         Assert.assertEquals(content, sentPacket.getString("content"))
+    }
+
+    @Test
+    fun testShizukuCallbackSendsClipboardPacket() {
+        clipboardPlugin.onCreate()
+        packet = null
+
+        shizukuCallback().onClipboardTextChanged("shizuku-callback-test", false)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        val sentPacket = checkNotNull(packet)
+        Assert.assertEquals("kdeconnect.clipboard", sentPacket.type)
+        Assert.assertEquals("shizuku-callback-test", sentPacket.getString("content"))
+        clipboardPlugin.onDestroy()
+    }
+
+    @Test
+    fun testShizukuCallbackSkipsSensitiveClipboard() {
+        preferences.edit().putBoolean(SKIP_SENSITIVE_PREF_KEY, true).apply()
+        val observer = mockk<ClipboardListener.ClipboardObserver>(relaxed = true)
+        clipboardListener.registerObserver(observer)
+        clipboardPlugin.onCreate()
+        packet = null
+
+        shizukuCallback().onClipboardTextChanged("sensitive-shizuku-callback-test", true)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        verify(exactly = 1) {
+            observer.clipboardChanged("sensitive-shizuku-callback-test", ClipboardListener.ClipboardContentType.Password)
+        }
+        Assert.assertNull(packet)
+        clipboardListener.removeObserver(observer)
+        clipboardPlugin.onDestroy()
+    }
+
+    private fun shizukuCallback(): IClipboardMonitorCallback {
+        val field = ClipboardListener::class.java.getDeclaredField("privilegedCallback")
+        field.isAccessible = true
+        return field.get(clipboardListener) as IClipboardMonitorCallback
     }
 }

@@ -39,8 +39,8 @@ With a compatible JDK and Android SDK 37 installed, run:
 ```
 
 The release APK is generated under `build/outputs/apk/release/` and uses
-`org.kde.kdeconnect_tp`. Release tags matching `v*-shizuku*` trigger GitHub Actions
-to test, build, sign, verify, and publish it. The workflow requires the repository
+`org.kde.kdeconnect_tp`. A merge to `main` containing a newer stable upstream release triggers GitHub Actions
+to test, build, sign, verify, tag, and publish it. The workflow requires the repository
 secrets `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
 `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`.
 
@@ -51,3 +51,24 @@ It uses `org.kde.kdeconnect_tp.debug` and the repository's existing debug signin
 
 - KDE for upstream KDE Connect.
 - Shoukaku39 for the original Shizuku-enabled fork.
+
+## Upstream synchronization
+
+The scheduled workflow checks for the newest stable KDE `vX.Y.Z` tag newer than
+this repository's published Shizuku release. It prepares a PR, runs unit tests,
+builds APKs, and merges only the exact tested result when all checks pass. A
+conflict, changed tag, changed base, failed test, or failed build blocks the
+merge. The workflow uploads a debug APK for optional device testing. It updates
+`main` with the tested merge commit directly; GitHub marks the PR as indirectly
+merged. Repository rules must allow that push, and indirect merges do not enforce
+PR-specific requirements.
+
+A successful merge publishes a signed APK and `SHA256SUMS` under
+`vX.Y.Z-shizuku-clipboard`. A push to `main` and manual workflow runs also check
+whether a new upstream release needs publication. An interrupted draft can be
+retried when its existing assets match the new build; existing published releases
+are never overwritten. GitHub Actions needs
+permission to create pull requests and write repository contents.
+
+The clipboard tests exercise the Shizuku callback and sensitive-content handling
+with mocks; they do not start Shizuku or verify its behavior on an actual device.

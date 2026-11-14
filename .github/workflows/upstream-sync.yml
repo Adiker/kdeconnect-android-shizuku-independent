@@ -1,4 +1,4 @@
-name: Sync KDE Connect upstream
+name: Prepare KDE Connect upstream release
 
 on:
   schedule:
@@ -20,8 +20,11 @@ jobs:
       pull-requests: read
     outputs:
       changed: ${{ steps.merge.outputs.changed }}
+      already_included: ${{ steps.merge.outputs.already_included }}
       base: ${{ steps.merge.outputs.base }}
       upstream: ${{ steps.merge.outputs.upstream }}
+      upstream_tag: ${{ steps.merge.outputs.upstream_tag }}
+      upstream_tag_object: ${{ steps.merge.outputs.upstream_tag_object }}
       tree: ${{ steps.merge.outputs.tree }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -39,14 +42,26 @@ jobs:
           git config core.hooksPath /dev/null
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git fetch --no-tags https://github.com/KDE/kdeconnect-android.git refs/heads/master:refs/remotes/kde/master
+          git fetch --no-tags https://github.com/KDE/kdeconnect-android.git '+refs/tags/*:refs/kde-tags/*'
+          git for-each-ref --format='%(refname:strip=2)' refs/kde-tags > "$RUNNER_TEMP/kde-tags"
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName,isDraft,isPrerelease > "$RUNNER_TEMP/fork-releases.json"
+          upstream_tag=$(python3 .github/scripts/select-upstream-tag.py "$RUNNER_TEMP/kde-tags" "$RUNNER_TEMP/fork-releases.json")
+          if [ -z "$upstream_tag" ]; then
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+            echo 'No newer stable KDE tag than the published fork release.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           base=$(git rev-parse HEAD)
-          upstream=$(git rev-parse refs/remotes/kde/master)
+          tag_object=$(git rev-parse "refs/kde-tags/$upstream_tag")
+          upstream=$(git rev-parse "refs/kde-tags/$upstream_tag^{commit}")
           echo "base=$base" >> "$GITHUB_OUTPUT"
           echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
+          echo "upstream_tag=$upstream_tag" >> "$GITHUB_OUTPUT"
+          echo "upstream_tag_object=$tag_object" >> "$GITHUB_OUTPUT"
           if git merge-base --is-ancestor "$upstream" "$base"; then
             echo 'changed=false' >> "$GITHUB_OUTPUT"
-            echo 'KDE master is already included in main.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'already_included=true' >> "$GITHUB_OUTPUT"
+            echo 'The upstream release is already included in main; checking publication.' >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           if ! git -c merge.renormalize=false merge --no-commit --no-ff "$upstream"; then
@@ -61,17 +76,6 @@ jobs:
             exit 1
           fi
           tree=$(git write-tree)
-          branch='automation/kde-upstream-sync'
-          if [ "$EVENT_NAME" = schedule ] && [ -n "$(gh pr list --base main --head "$branch" --state open --json number --jq '.[0].number // empty')" ]; then
-            if git fetch --no-tags origin "refs/heads/$branch:refs/remotes/origin/$branch"; then
-              read -r commit parent1 parent2 extra < <(git rev-list --parents -n 1 "refs/remotes/origin/$branch")
-              if [ "${parent1:-}" = "$base" ] && [ "${parent2:-}" = "$upstream" ] && [ -z "${extra:-}" ] && [ "$(git rev-parse "$commit^{tree}")" = "$tree" ]; then
-                echo 'changed=false' >> "$GITHUB_OUTPUT"
-                echo 'An up-to-date synchronization PR already exists.' >> "$GITHUB_STEP_SUMMARY"
-                exit 0
-              fi
-            fi
-          fi
           echo 'changed=true' >> "$GITHUB_OUTPUT"
           echo "tree=$tree" >> "$GITHUB_OUTPUT"
 
@@ -90,14 +94,16 @@ jobs:
       - name: Reconstruct tested merge
         env:
           UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream }}
+          UPSTREAM_TAG: ${{ needs.prepare.outputs.upstream_tag }}
+          UPSTREAM_TAG_OBJECT: ${{ needs.prepare.outputs.upstream_tag_object }}
           EXPECTED_TREE: ${{ needs.prepare.outputs.tree }}
         run: |
           set -euo pipefail
           git config core.hooksPath /dev/null
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git fetch --no-tags https://github.com/KDE/kdeconnect-android.git refs/heads/master:refs/remotes/kde/master
-          git cat-file -e "$UPSTREAM_SHA^{commit}"
+          git fetch --no-tags https://github.com/KDE/kdeconnect-android.git "refs/tags/$UPSTREAM_TAG:refs/kde-tags/$UPSTREAM_TAG"
+          test "$(git rev-parse "refs/kde-tags/$UPSTREAM_TAG")" = "$UPSTREAM_TAG_OBJECT" && test "$(git rev-parse "refs/kde-tags/$UPSTREAM_TAG^{commit}")" = "$UPSTREAM_SHA" || { echo '::error::Upstream tag changed during the run.'; exit 1; }
           git -c merge.renormalize=false merge --no-commit --no-ff "$UPSTREAM_SHA"
           test "$(git write-tree)" = "$EXPECTED_TREE"
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
@@ -118,6 +124,8 @@ jobs:
           (yes || true) | "$sdk_root/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$sdk_root" 'platforms;android-37.0' 'build-tools;36.0.0' 'build-tools;37.0.0' 'platform-tools'
           find "$sdk_root/platforms" -name android.jar -print -quit | grep -q .
           test -x "$sdk_root/build-tools/37.0.0/apksigner"
+      - name: Test tag selection
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
       - name: Test and build APKs
         run: ./gradlew --no-daemon --console=plain testDebugUnitTest assembleDebug assembleRelease
       - name: Upload debug APK for device testing
@@ -135,17 +143,22 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+    outputs:
+      merged_commit: ${{ steps.publish.outputs.merged_commit }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.prepare.outputs.base }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Publish or update synchronization PR
+      - id: publish
+        name: Publish or update synchronization PR
         env:
           GH_TOKEN: ${{ github.token }}
           BASE_SHA: ${{ needs.prepare.outputs.base }}
           UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream }}
+          UPSTREAM_TAG: ${{ needs.prepare.outputs.upstream_tag }}
+          UPSTREAM_TAG_OBJECT: ${{ needs.prepare.outputs.upstream_tag_object }}
           EXPECTED_TREE: ${{ needs.prepare.outputs.tree }}
           TEST_RESULT: ${{ needs.test.result }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -157,8 +170,8 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
           test "$(git rev-parse refs/remotes/origin/main)" = "$BASE_SHA" || { echo '::error::main changed during the run; retry the synchronization.'; exit 1; }
-          git fetch --no-tags https://github.com/KDE/kdeconnect-android.git refs/heads/master:refs/remotes/kde/master
-          git cat-file -e "$UPSTREAM_SHA^{commit}"
+          git fetch --no-tags https://github.com/KDE/kdeconnect-android.git "refs/tags/$UPSTREAM_TAG:refs/kde-tags/$UPSTREAM_TAG"
+          test "$(git rev-parse "refs/kde-tags/$UPSTREAM_TAG")" = "$UPSTREAM_TAG_OBJECT" && test "$(git rev-parse "refs/kde-tags/$UPSTREAM_TAG^{commit}")" = "$UPSTREAM_SHA" || { echo '::error::Upstream tag changed during the run.'; exit 1; }
           pr=$(gh pr list --base main --head "$branch" --state open --json number --jq '.[0].number // empty')
           old=$(git ls-remote --heads origin "refs/heads/$branch" | cut -f1)
           if [ -n "$old" ]; then
@@ -185,9 +198,41 @@ jobs:
           fi
           # Backticks are literal Markdown code delimiters.
           # shellcheck disable=SC2016
-          body=$(printf 'Automated merge of KDE Connect master `%s` into main `%s`.\n\nTests and APK builds: **%s**. [Workflow run](%s)\n\nReview the upstream changes and Shizuku behavior before merging.' "$UPSTREAM_SHA" "$BASE_SHA" "$TEST_RESULT" "$RUN_URL")
+          body=$(printf 'Automated merge of KDE Connect tag `%s` (commit `%s`) into main `%s`.\n\nTests and APK builds: **%s**. [Workflow run](%s)\n\nThe automated checks do not exercise a real Shizuku service.' "$UPSTREAM_TAG" "$UPSTREAM_SHA" "$BASE_SHA" "$TEST_RESULT" "$RUN_URL")
           if [ -n "$pr" ]; then
-            gh pr edit "$pr" --title 'Sync KDE Connect upstream master' --body "$body"
+            gh pr edit "$pr" --title "Sync KDE Connect upstream $UPSTREAM_TAG" --body "$body"
           else
-            gh pr create --base main --head "$branch" --title 'Sync KDE Connect upstream master' --body "$body"
+            gh pr create --base main --head "$branch" --title "Sync KDE Connect upstream $UPSTREAM_TAG" --body "$body"
           fi
+
+          if [ "$TEST_RESULT" != success ]; then
+            echo '::error::Tests failed; automatic merge is blocked.'
+            exit 1
+          fi
+          # Push the exact tested merge as a fast-forward, with an atomic base lease.
+          # This prevents a change to main between verification and publication.
+          head=$(git ls-remote --heads origin "refs/heads/$branch" | cut -f1)
+          git fetch --no-tags origin "refs/heads/$branch:refs/remotes/origin/$branch"
+          test "$(git rev-parse refs/remotes/origin/$branch)" = "$head"
+          read -r commit parent1 parent2 extra < <(git rev-list --parents -n 1 "$head")
+          test "$parent1" = "$BASE_SHA" && test "$parent2" = "$UPSTREAM_SHA" && test -z "${extra:-}"
+          test "$(git rev-parse "$head^{tree}")" = "$EXPECTED_TREE"
+          current_tag=$(git ls-remote --refs https://github.com/KDE/kdeconnect-android.git "refs/tags/$UPSTREAM_TAG" | cut -f1)
+          test "$current_tag" = "$UPSTREAM_TAG_OBJECT" || { echo '::error::Upstream tag changed before merge.'; exit 1; }
+          gh auth setup-git
+          git push --force-with-lease="refs/heads/main:$BASE_SHA" origin "$head:refs/heads/main"
+          echo "merged_commit=$head" >> "$GITHUB_OUTPUT"
+          git push --force-with-lease="refs/heads/$branch:$head" origin ":refs/heads/$branch"
+
+  release:
+    needs: [prepare, pull-request]
+    if: >-
+      always() && needs.prepare.result == 'success' &&
+      (needs.pull-request.result == 'success' || needs.prepare.outputs.already_included == 'true')
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      commit: ${{ needs.pull-request.outputs.merged_commit || needs.prepare.outputs.base }}
+      upstream_tag: ${{ needs.prepare.outputs.upstream_tag }}
+    secrets: inherit
