@@ -13,6 +13,7 @@ import android.database.sqlite.SQLiteException
 import android.media.MediaMetadataRetriever
 import android.media.ThumbnailUtils
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.provider.Telephony
@@ -218,7 +219,7 @@ object SMSHelper {
      * @param sortOrder Sort ordering passed to Android's content resolver. May be null for unspecified
      * @param numberToGet Number of things to get from the result. Pass null to get all
      * @return Returns List<Message> of all messages in the return set, either in the order of sortOrder or in an unspecified order
-    </Message> */
+     */
     private fun getMessages(
         uri: Uri,
         context: Context,
@@ -230,8 +231,7 @@ object SMSHelper {
     ): MutableList<Message> {
         val toReturn = mutableListOf<Message>()
 
-        // Get all the active phone numbers so we can filter the user out of the list of targets
-        // of any MMSes
+        // Get all the active phone numbers so we can filter the user out of the list of targets of any MMSes
         val userPhoneNumbers = TelephonyHelper.getAllPhoneNumbers(context)
         try {
             context.contentResolver.query(
@@ -288,8 +288,7 @@ object SMSHelper {
                                 )
                             }
                         } catch (e: Exception) {
-                            // Swallow exceptions in case we get an error reading one message so that we
-                            // might be able to read some of them
+                            // Swallow exceptions in case we get an error reading one message so that we might be able to read some of them
                             Log.e("SMSHelper", "Got an error reading a message of type $transportType", e)
                         }
                     } while ((numberToGet == null || toReturn.size < numberToGet) && myCursor.moveToNext())
@@ -335,7 +334,7 @@ object SMSHelper {
      * @param sortOrder Sort ordering passed to Android's content resolver. May be null for unspecified
      * @param numberToGet Number of things to get from the result. Pass null to get all
      * @return Returns List<Message> of all messages in the return set, either in the order of sortOrder or in an unspecified order
-    </Message> */
+     */
     @SuppressLint("NewApi")
     private fun getMessages(
         uri: Uri,
@@ -601,12 +600,16 @@ object SMSHelper {
                                     context,
                                     ContentUris.withAppendedId(mMSPartUri, partID)
                                 )
-                                val videoThumbnail = retriever.getScaledFrameAtTime(
-                                    -1,
-                                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
-                                    THUMBNAIL_WIDTH,
-                                    THUMBNAIL_HEIGHT
-                                )
+                                val videoThumbnail = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                                    retriever.getScaledFrameAtTime(
+                                        -1,
+                                        MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                                        THUMBNAIL_WIDTH,
+                                        THUMBNAIL_HEIGHT
+                                    )
+                                } else {
+                                    null
+                                }
                                 if (videoThumbnail != null) {
                                     val encodedThumbnail = SmsMmsUtils.bitMapToBase64(videoThumbnail)
                                     attachments.add(
@@ -641,9 +644,8 @@ object SMSHelper {
             Telephony.Mms.MESSAGE_BOX_INBOX -> Telephony.Sms.MESSAGE_TYPE_INBOX
             Telephony.Mms.MESSAGE_BOX_SENT -> Telephony.Sms.MESSAGE_TYPE_SENT
             else -> {
-                // As an undocumented feature, it looks like the values of Mms.MESSAGE_BOX_*
-                // are the same as Sms.MESSAGE_TYPE_* of the same type. So by default let's just use
-                // the value we've got.
+                // As an undocumented feature, it looks like the values of Mms.MESSAGE_BOX_* are the same
+                // as Sms.MESSAGE_TYPE_* of the same type. So by default let's just use the value we've got.
                 // This includes things like drafts, which are a far-distant plan to support
                 messageBox
             }
@@ -706,8 +708,6 @@ object SMSHelper {
         val uri = ContentUris.appendId(Telephony.Mms.CONTENT_URI.buildUpon(), uID).build()
         return try {
             // Work around https://bugs.kde.org/show_bug.cgi?id=434348 by querying the PduCache directly
-            // Most likely, this is how we should do business anyway and we will probably see a
-            // decent speedup...
             val pduCache = PduCache.getInstance()
             val maybePduValue: PduCacheEntry? = synchronized(pduCache) { pduCache[uri] }
             if (maybePduValue != null) {
@@ -741,14 +741,14 @@ object SMSHelper {
      *
      * The structure of the input is expected to be as follows:
      * [
-     * {
-     * "fileName": <String>             // Name of the file
-     * "base64EncodedFile": <String>    // Base64 encoded file
-     * "mimeType": <String>             // File type (eg: image/jpg, video/mp4 etc.)
-     * },
-     * ...
+     *   {
+     *     "fileName": <String>             // Name of the file
+     *     "base64EncodedFile": <String>    // Base64 encoded file
+     *     "mimeType": <String>             // File type (eg: image/jpg, video/mp4 etc.)
+     *   },
+     *   ...
      * ]
-    </String></String></String></Attachment> */
+     */
     fun jsonArrayToAttachmentsList(jsonArray: JsonArray?): List<Attachment> {
         if (jsonArray == null) {
             return emptyList()
@@ -769,8 +769,8 @@ object SMSHelper {
     }
 
     /**
-     * converts a given JsonArray into List<Address>
-    </Address> */
+     * converts a given `JsonArray` into `List<Address>`
+     */
     fun jsonArrayToAddressList(jsonArray: JsonArray): List<Address> {
         val addresses = mutableListOf<Address>()
         try {
@@ -861,7 +861,6 @@ object SMSHelper {
     enum class TransportType {
         SMS,
         MMS
-        // Maybe in the future there will be more TransportType, but for now these are all I know about
     }
 
     /**
@@ -918,9 +917,7 @@ object SMSHelper {
              * Any events not supported by the receiving device should be ignored
              */
             const val EVENT_UNKNOWN = 0x0 // The message was of some type we did not understand
-            const val EVENT_TEXT_MESSAGE = 0x1 // This message has a "body" field which contains
-
-            // pure, human-readable text
+            const val EVENT_TEXT_MESSAGE = 0x1 // This message has a "body" field which contains, human-readable text
             const val EVENT_MULTI_TARGET = 0x2 // Indicates that this message has multiple recipients
 
             /**

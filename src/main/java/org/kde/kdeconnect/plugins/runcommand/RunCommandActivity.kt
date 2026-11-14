@@ -27,36 +27,28 @@ import org.kde.kdeconnect_tp.R
 
 class RunCommandActivity : AppCompatActivity() {
 
-    val commandList = mutableStateListOf<CommandEntry>()
+    val commandList = mutableStateListOf<CommandInfo>()
 
     private lateinit var plugin: RunCommandPlugin
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Log.d("RunCommandActivity", "Launched")
-        val deviceId = intent.getStringExtra(EXTRA_DEVICE_ID)!!
-        val device = KdeConnect.getInstance().getDevice(deviceId)
-        plugin = device?.getPlugin<RunCommandPlugin>() ?: run {
-            finish()
-            return
-        }
+        plugin = KdeConnect.getInstance().getDevicePlugin<RunCommandPlugin>(intent.getStringExtra(EXTRA_DEVICE_ID))
+            ?: return finish()
 
-        for (info in plugin.commandList) {
-            commandList.add(CommandEntry(info))
-        }
-        commandList.sortBy { it.name.lowercase() }
-
+        commandList.addAll(plugin.commandList)
 
         setContent {
             val clipboardManager = LocalClipboard.current
 
             RunCommandScreen(
                 plugin = plugin,
-                device = device,
+                device = plugin.device,
                 commandList = commandList,
                 onBackPressedDispatcher = onBackPressedDispatcher,
                 onCopyUrlToClipboard = {
-                    copyCommandToClipboard(device, it, clipboardManager)
+                    copyCommandToClipboard(plugin.device, it, clipboardManager)
                 },
                 onUpdate = {
                     updateList()
@@ -67,7 +59,7 @@ class RunCommandActivity : AppCompatActivity() {
 
     private fun copyCommandToClipboard(
         device: Device,
-        command: CommandEntry,
+        command: CommandInfo,
         clipboardManager: Clipboard
     ) {
         val url = "kdeconnect://runcommand/${device.deviceId}/${command.key}"
@@ -85,11 +77,8 @@ class RunCommandActivity : AppCompatActivity() {
     }
 
     private fun updateList() {
-        commandList.removeAll(commandList)
-        for (info in plugin.commandList) {
-            commandList.add(CommandEntry(info))
-        }
-        commandList.sortBy { it.name.lowercase() }
+        commandList.clear()
+        commandList.addAll(plugin.commandList)
     }
 
     companion object {

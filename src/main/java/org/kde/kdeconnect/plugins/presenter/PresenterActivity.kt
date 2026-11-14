@@ -34,11 +34,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -47,7 +44,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -60,14 +56,16 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.core.content.getSystemService
 import androidx.media.VolumeProviderCompat
-import androidx.preference.PreferenceManager
 import org.kde.kdeconnect.Device
 import org.kde.kdeconnect.KdeConnect
-import org.kde.kdeconnect.ui.compose.components.DeviceDisconnectedOverlay
 import org.kde.kdeconnect.ui.compose.KdeButton
+import org.kde.kdeconnect.ui.compose.KdeDropdownMenuItem
+import org.kde.kdeconnect.ui.compose.KdeOverflowMenu
 import org.kde.kdeconnect.ui.compose.KdeTheme
 import org.kde.kdeconnect.ui.compose.KdeTopAppBar
+import org.kde.kdeconnect.ui.compose.components.DeviceDisconnectedOverlay
 import org.kde.kdeconnect_tp.R
 
 private const val VOLUME_UP = 1
@@ -103,18 +101,14 @@ class PresenterActivity : AppCompatActivity(), SensorEventListener, OnSharedPref
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        val deviceId = intent.getStringExtra(EXTRA_DEVICE_ID)!!
-        val device = KdeConnect.getInstance().getDevice(deviceId)
-        plugin = device?.getPlugin<PresenterPlugin>() ?: run {
-            finish()
-            return
-        }
+        plugin = KdeConnect.getInstance().getDevicePlugin<PresenterPlugin>(intent.getStringExtra(EXTRA_DEVICE_ID))
+            ?: return finish()
 
         prefs = plugin.preferences
         prefs.registerOnSharedPreferenceChangeListener(this)
         applyPrefs()
 
-        setContent { PresenterScreen(device.name, device) }
+        setContent { PresenterScreen(plugin.device.name, plugin.device) }
         createMediaSession()
     }
 
@@ -193,7 +187,7 @@ class PresenterActivity : AppCompatActivity(), SensorEventListener, OnSharedPref
     @Composable
     private fun PresenterScreen(deviceName: String, device: Device? = null) {
 
-        val sensorManager = LocalContext.current.getSystemService(SENSOR_SERVICE) as? SensorManager
+        val sensorManager = LocalContext.current.getSystemService<SensorManager>()
         val haptics = LocalHapticFeedback.current
 
         KdeTheme(this) {
@@ -282,40 +276,25 @@ class PresenterActivity : AppCompatActivity(), SensorEventListener, OnSharedPref
 
     @Composable
     private fun PresenterAppBar(subTitle: String) {
-
-        var menuExpanded by remember { mutableStateOf(false) }
-
         KdeTopAppBar(
             title = stringResource(R.string.pref_plugin_presenter),
             subTitle = subTitle,
             navIconOnClick = { onBackPressedDispatcher.onBackPressed() },
             navIconDescription = getString(androidx.appcompat.R.string.abc_action_bar_up_description),
             actions = {
-                IconButton(onClick = { menuExpanded = true }) {
-                    Icon(Icons.Default.MoreVert, stringResource(R.string.extra_options))
-                }
-                DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-                    DropdownMenuItem(
-                        onClick = {
-                            menuExpanded = false
-                            plugin.sendFullscreen()
-                        },
-                        text = { Text(stringResource(R.string.presenter_fullscreen)) },
-                    )
-                    DropdownMenuItem(
-                        onClick = {
-                            menuExpanded = false
-                            plugin.sendEsc()
-                        },
-                        text = { Text(stringResource(R.string.presenter_exit)) },
-                    )
-                    DropdownMenuItem(
-                        onClick = {
-                            menuExpanded = false
-                            zoomControlsVisible = true
-                        },
-                        text = { Text(stringResource(R.string.presenter_change_zoom)) },
-                    )
+                KdeOverflowMenu { dismiss ->
+                    KdeDropdownMenuItem(stringResource(R.string.presenter_fullscreen)) {
+                        dismiss()
+                        plugin.sendFullscreen()
+                    }
+                    KdeDropdownMenuItem(stringResource(R.string.presenter_exit)) {
+                        dismiss()
+                        plugin.sendEsc()
+                    }
+                    KdeDropdownMenuItem(stringResource(R.string.presenter_change_zoom)) {
+                        dismiss()
+                        zoomControlsVisible = true
+                    }
                 }
             }
         )

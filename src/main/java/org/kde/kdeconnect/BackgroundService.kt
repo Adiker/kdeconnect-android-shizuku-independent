@@ -73,7 +73,7 @@ class BackgroundService : Service() {
         linkProviders.add(BluetoothLinkProvider(this))
     }
 
-    fun onNetworkChange(network: Network?) {
+    private fun onNetworkChange(network: Network?) {
         if (!initialized) {
             Log.d(TAG, "ignoring onNetworkChange called before the service is initialized")
             return
@@ -246,6 +246,7 @@ class BackgroundService : Service() {
         screenOnReceiver = null
         networkCallback?.let { getSystemService<ConnectivityManager>()?.unregisterNetworkCallback(it) }
         networkCallback = null
+        instance = null
         super.onDestroy()
     }
 
@@ -292,27 +293,42 @@ class BackgroundService : Service() {
                 addTransportType(NetworkCapabilities.TRANSPORT_VPN)
                 addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
                 addTransportType(NetworkCapabilities.TRANSPORT_BLUETOOTH)
-                if (Build.VERSION.SDK_INT > Build.VERSION_CODES.O) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     addTransportType(NetworkCapabilities.TRANSPORT_WIFI_AWARE)
                 }
-                if (Build.VERSION.SDK_INT > Build.VERSION_CODES.S) {
-                    addTransportType(NetworkCapabilities.TRANSPORT_USB)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
                     addTransportType(NetworkCapabilities.TRANSPORT_LOWPAN)
                 }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    addTransportType(NetworkCapabilities.TRANSPORT_USB)
+                }
+            }
+        }
+
+        private fun startService(context: Context, intent: Intent) {
+            try {
+                ContextCompat.startForegroundService(context, intent)
+            } catch (e: IllegalStateException) { // To catch ForegroundServiceStartNotAllowedException
+                Log.w(TAG, "Couldn't start BackgroundService", e)
             }
         }
 
         fun Start(context: Context) {
             Log.d(TAG, "Start")
             val intent = Intent(context, BackgroundService::class.java)
-            ContextCompat.startForegroundService(context, intent)
+            startService(context, intent)
         }
 
         fun ForceRefreshConnections(context: Context) {
             Log.d(TAG, "ForceRefreshConnections")
+            val service = instance
+            if (initialized && service != null) {
+                service.onNetworkChange(null)
+                return
+            }
             val intent = Intent(context, BackgroundService::class.java)
             intent.putExtra("refresh", true)
-            ContextCompat.startForegroundService(context, intent)
+            startService(context, intent)
         }
     }
 }

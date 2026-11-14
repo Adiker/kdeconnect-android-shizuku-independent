@@ -21,16 +21,14 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
-import androidx.core.content.ContextCompat
 import androidx.core.content.getSystemService
 import androidx.core.view.OnApplyWindowInsetsListener
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
-import androidx.preference.PreferenceManager
 import org.kde.kdeconnect.KdeConnect
-import org.kde.kdeconnect.ui.compose.components.addDeviceDisconnectedOverlay
 import org.kde.kdeconnect.base.BaseActivity
 import org.kde.kdeconnect.ui.PluginSettingsActivity
+import org.kde.kdeconnect.ui.compose.components.addDeviceDisconnectedOverlay
 import org.kde.kdeconnect_tp.R
 import org.kde.kdeconnect_tp.databinding.ActivityMousepadBinding
 import kotlin.math.abs
@@ -45,13 +43,12 @@ class MousePadActivity :
     SharedPreferences.OnSharedPreferenceChangeListener,
     OnApplyWindowInsetsListener {
 
-    private lateinit var deviceId: String
     private lateinit var plugin: MousePadPlugin
 
     private var mPrevX: Float = 0f
     private var mPrevY: Float = 0f
-    internal var dragging: Boolean = false
-    internal var maybeDragging: Boolean = false
+    private var dragging: Boolean = false
+    private var maybeDragging: Boolean = false
     private var accumulatedDragDistance2: Float = 0.0f
     private var mCurrentSensitivity: Float = 1.0f
     private var displayDpiMultiplier: Float = 1.0f
@@ -72,11 +69,9 @@ class MousePadActivity :
     private lateinit var mMousePadGestureDetector: MousePadGestureDetector
     private lateinit var mPointerAccelerationProfile: PointerAccelerationProfile
 
-    private var mouseDelta: PointerAccelerationProfile.MouseDelta = PointerAccelerationProfile.MouseDelta() // to be reused on every touch move event
+    private val mouseDelta = PointerAccelerationProfile.MouseDelta() // to be reused on every touch move event
 
     private lateinit var keyListenerView: KeyListenerView
-
-    private lateinit var prefs: SharedPreferences
 
     private var prefsApplied: Boolean = false
 
@@ -139,33 +134,29 @@ class MousePadActivity :
         binding.mouseClickMiddle.setOnClickListener { sendMiddleClick() }
         binding.mouseClickRight.setOnClickListener { sendRightClick() }
 
-        deviceId = intent.getStringExtra(EXTRA_DEVICE_ID) ?: ""
-        val device = KdeConnect.getInstance().getDevice(deviceId)
-        plugin = device?.getPlugin<MousePadPlugin>() ?: run {
-            finish()
-            return
-        }
-        binding.root.addDeviceDisconnectedOverlay(device)
+        plugin = KdeConnect.getInstance().getDevicePlugin<MousePadPlugin>(intent.getStringExtra(EXTRA_DEVICE_ID))
+            ?: return finish()
+        binding.root.addDeviceDisconnectedOverlay(plugin.device)
+        supportActionBar?.subtitle = plugin.device.name
 
         window.decorView.isHapticFeedbackEnabled = true
 
         mDetector = GestureDetector(this, this)
         mMousePadGestureDetector = MousePadGestureDetector(this)
         mDetector.setOnDoubleTapListener(this)
-        mSensorManager = ContextCompat.getSystemService(this, SensorManager::class.java)
+        mSensorManager = getSystemService<SensorManager>()
 
         keyListenerView = binding.keyListener
-        keyListenerView.setDeviceId(deviceId)
+        keyListenerView.setDeviceId(plugin.device.deviceId)
         ViewCompat.setOnApplyWindowInsetsListener(keyListenerView, this)
 
-        prefs = PreferenceManager.getDefaultSharedPreferences(this)
-        prefs.registerOnSharedPreferenceChangeListener(this)
+        plugin.preferences.registerOnSharedPreferenceChangeListener(this)
 
         applyPrefs()
 
         // Technically xdpi and ydpi should be handled separately,
         // but since ydpi is usually almost equal to xdpi, only xdpi is used for the multiplier.
-        displayDpiMultiplier = StandardDpi / resources.displayMetrics.xdpi
+        displayDpiMultiplier = STANDARD_DPI / resources.displayMetrics.xdpi
 
         val decorView = window.decorView
         decorView.setOnSystemUiVisibilityChangeListener { visibility ->
@@ -221,16 +212,20 @@ class MousePadActivity :
     }
 
     override fun onDestroy() {
-        if (::prefs.isInitialized) {
-            prefs.unregisterOnSharedPreferenceChangeListener(this)
+        if (::plugin.isInitialized) {
+            plugin.preferences.unregisterOnSharedPreferenceChangeListener(this)
         }
         super.onDestroy()
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        if (!::plugin.isInitialized) {
+            return false
+        }
+
         menuInflater.inflate(R.menu.menu_mousepad, menu)
 
-        val mouseButtonsEnabled = prefs.getBoolean(getString(R.string.mousepad_mouse_buttons_enabled_pref), true)
+        val mouseButtonsEnabled = plugin.preferences.getBoolean(getString(R.string.mousepad_mouse_buttons_enabled_pref), true)
 
         menu.findItem(R.id.menu_right_click).isVisible = !mouseButtonsEnabled
         menu.findItem(R.id.menu_middle_click).isVisible = !mouseButtonsEnabled
@@ -248,7 +243,7 @@ class MousePadActivity :
                 true
             }
             R.id.menu_open_mousepad_settings -> {
-                val intent = PluginSettingsActivity.createIntent(this, deviceId, MousePadPlugin::class.java.simpleName)
+                val intent = PluginSettingsActivity.createIntent(this, plugin.device.deviceId, MousePadPlugin::class.java.simpleName)
                 startActivity(intent)
                 true
             }
@@ -305,7 +300,7 @@ class MousePadActivity :
 
                 if (maybeDragging) {
                     accumulatedDragDistance2 += deltaX * deltaX + deltaY * deltaY
-                    if (accumulatedDragDistance2 >= MinDraggingDistance2) {
+                    if (accumulatedDragDistance2 >= MIN_DRAGGING_DISTANCE_SQUARED) {
                         maybeDragging = false
                         dragging = true
                         accumulatedDragDistance2 = 0.0f
@@ -314,7 +309,7 @@ class MousePadActivity :
                 } else {
                     // Run the mouse delta through the pointer acceleration profile
                     mPointerAccelerationProfile.touchMoved(deltaX, deltaY, event.eventTime)
-                    mouseDelta = mPointerAccelerationProfile.commitAcceleratedMouseDelta(mouseDelta)
+                    mPointerAccelerationProfile.commitAcceleratedMouseDelta(mouseDelta)
 
                     plugin.sendMouseDelta(mouseDelta.x, mouseDelta.y)
                 }
@@ -349,7 +344,7 @@ class MousePadActivity :
             accumulatedDistanceX += distanceX
             accumulatedDistanceY += distanceY
 
-            if (abs(accumulatedDistanceX) > MinDistanceToSendScroll || abs(accumulatedDistanceY) > MinDistanceToSendScroll) {
+            if (abs(accumulatedDistanceX) > MIN_DISTANCE_TO_SEND_SCROLL || abs(accumulatedDistanceY) > MIN_DISTANCE_TO_SEND_SCROLL) {
                 sendScroll(accumulatedDistanceX, accumulatedDistanceY)
                 accumulatedDistanceX = 0.0
                 accumulatedDistanceY = 0.0
@@ -375,16 +370,16 @@ class MousePadActivity :
 
         // Suppress minor perpendicular motion near either axis while preserving
         // deliberate diagonal scrolling.
-        if (absX < absY * DirectionLockRatio) {
+        if (absX < absY * DIRECTION_LOCK_RATIO) {
             filteredDistanceX = 0f
-        } else if (absY < absX * DirectionLockRatio) {
+        } else if (absY < absX * DIRECTION_LOCK_RATIO) {
             filteredDistanceY = 0f
         }
 
         accumulatedDistanceX += filteredDistanceX * scrollCoefficient
         accumulatedDistanceY += filteredDistanceY * scrollCoefficient
 
-        if (abs(accumulatedDistanceX) > MinDistanceToSendScroll || abs(accumulatedDistanceY) > MinDistanceToSendScroll) {
+        if (abs(accumulatedDistanceX) > MIN_DISTANCE_TO_SEND_SCROLL || abs(accumulatedDistanceY) > MIN_DISTANCE_TO_SEND_SCROLL) {
             sendScroll(-scrollDirection * accumulatedDistanceX, scrollDirection * accumulatedDistanceY)
 
             accumulatedDistanceX = 0.0
@@ -511,28 +506,26 @@ class MousePadActivity :
 
     private fun showCompose() {
         val intent = Intent(this, ComposeSendActivity::class.java)
-        intent.putExtra(ComposeSendActivity.EXTRA_DEVICE_ID, deviceId)
+        intent.putExtra(ComposeSendActivity.EXTRA_DEVICE_ID, plugin.device.deviceId)
         startActivity(intent)
     }
 
     private fun applyPrefs() {
         if (prefsApplied) return
-        if (!::prefs.isInitialized) return
 
-        val p = prefs
+        val p = plugin.preferences
 
-        if (p.getBoolean(getString(R.string.mousepad_scroll_direction), false)) {
-            scrollDirection = -1
-        } else {
-            scrollDirection = 1
-        }
+        val reverseScroll = p.getBoolean(getString(R.string.mousepad_scroll_direction), false)
+        scrollDirection = if (reverseScroll) -1 else 1
 
         var scrollSensitivity = p.getInt(getString(R.string.mousepad_scroll_sensitivity), 100)
         if (scrollSensitivity == 0) scrollSensitivity = 1
         scrollCoefficient = (scrollSensitivity / 100f).toDouble().pow(1.5)
 
         allowGyro = isGyroSensorAvailable() && p.getBoolean(getString(R.string.gyro_mouse_enabled), false)
-        if (allowGyro) gyroscopeSensitivity = p.getInt(getString(R.string.gyro_mouse_sensitivity), 100)
+        if (allowGyro) {
+            gyroscopeSensitivity = p.getInt(getString(R.string.gyro_mouse_sensitivity), 100)
+        }
 
         val singleTapSetting = p.getString(
             getString(R.string.mousepad_single_tap_key),
@@ -612,9 +605,9 @@ class MousePadActivity :
     companion object {
         const val EXTRA_DEVICE_ID = "deviceId"
 
-        private const val MinDistanceToSendScroll = 2.5f // touch gesture scroll
-        private const val DirectionLockRatio = 0.5f
-        private const val StandardDpi = 240.0f // = hdpi
-        private const val MinDraggingDistance2 = 25.0f // distance squared to move after a double tap to start dragging
+        private const val MIN_DISTANCE_TO_SEND_SCROLL = 2.5f // touch gesture scroll
+        private const val DIRECTION_LOCK_RATIO = 0.5f
+        private const val STANDARD_DPI = 240.0f // = hdpi
+        private const val MIN_DRAGGING_DISTANCE_SQUARED = 25.0f // distance squared to move after a double tap to start dragging
     }
 }
